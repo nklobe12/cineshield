@@ -1,0 +1,29 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.klobe.cineshield'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'com.klobe.cineshield'
+        minSdk 22
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+    signingConfigs {
+        // Fixed key so a new build installs over the old one on the TV.
+        shield {
+            storeFile file('cineshield.jks')
+            storePassword 'cineshield'
+            keyAlias 'cineshield'
+            keyPassword 'cineshield'
+        }
+    }
+    buildTypes {
+        release { minifyEnabled false; signingConfig signingConfigs.shield }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+dependencies { implementation 'androidx.webkit:webkit:1.11.0' }
