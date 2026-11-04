@@ -36,3 +36,5 @@ monetag.com
 adtng.com
 a-ads.com
 coinzilla.com
+giphy.com
+tenor.com

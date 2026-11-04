@@ -69,11 +69,44 @@
     return nativeSubmit.call(this);
   };
 
+  // Lightweight mode: on the site's own pages only, never inside video players.
+  var lite = isTop && isSite(location.hostname.toLowerCase());
+  var LITE_CSS =
+    '*,*::before,*::after{animation-duration:.001s!important;animation-delay:0s!important;' +
+    'animation-iteration-count:1!important;transition-duration:.001s!important;' +
+    'transition-delay:0s!important;backdrop-filter:none!important;' +
+    '-webkit-backdrop-filter:none!important;filter:none!important;box-shadow:none!important;' +
+    'text-shadow:none!important;scroll-behavior:auto!important}' +
+    'img[src*=".gif"]{visibility:hidden!important}' +
+    'html,body{background-image:none!important;background-color:#0b0d10!important}';
+  function addLiteStyle() {
+    var style = document.createElement('style');
+    style.textContent = LITE_CSS;
+    (document.head || document.documentElement).appendChild(style);
+  }
+  // Decorative clips are looped or short. Films, episodes and live streams are not.
+  function stopBackgroundVideo(e) {
+    var v = e.target;
+    if (!v || v.tagName !== 'VIDEO') return;
+    if (!v.loop && !(isFinite(v.duration) && v.duration > 0 && v.duration < 300)) return;
+    v.pause();
+    v.removeAttribute('src');
+    v.load();
+    v.style.setProperty('display', 'none', 'important');
+  }
+  if (lite) {
+    if (document.documentElement) addLiteStyle();
+    else document.addEventListener('readystatechange', addLiteStyle, { once: true });
+    window.addEventListener('loadedmetadata', stopBackgroundVideo, true);
+    window.addEventListener('play', stopBackgroundVideo, true);
+  }
+
   var MAX_Z = 2147480000;
   function isOverlay(el) {
     if (el.nodeType !== 1 || el === document.documentElement || el === document.body) return false;
     if (el.querySelector && el.querySelector('video')) return false;
     if (el.tagName === 'VIDEO') return false;
+    if (el.tagName === 'A' && linkAllowed(el.getAttribute('href'))) return false;
     var s = getComputedStyle(el);
     if (s.position !== 'fixed' && s.position !== 'absolute') return false;
     var r = el.getBoundingClientRect();
@@ -82,19 +115,57 @@
     var z = parseInt(s.zIndex, 10) || 0;
     return z >= MAX_Z && area > 0.25 && !(el.textContent || '').trim();
   }
+  function solidify(el) {
+    // With blur off, see-through search and menu layers need a plain backing.
+    if (el.nodeType !== 1 || el.tagName === 'IFRAME' || el.tagName === 'VIDEO') return;
+    var s = getComputedStyle(el);
+    if (s.position !== 'fixed') return;
+    var r = el.getBoundingClientRect();
+    if (r.width * r.height < 0.5 * innerWidth * innerHeight) return;
+    var m = s.backgroundColor.match(/[\d.]+/g);
+    var alpha = !m ? 0 : (m.length > 3 ? parseFloat(m[3]) : 1);
+    if (alpha < 0.9) el.style.setProperty('background-color', '#0b0d10', 'important');
+  }
   function sweep(root) {
     if (root.nodeType !== 1) return;
     if (isOverlay(root)) { root.remove(); return; }
-    var list = root.querySelectorAll ? root.querySelectorAll('a[href], div') : [];
-    for (var i = 0; i < list.length; i++) {
-      if (list[i].isConnected && isOverlay(list[i])) list[i].remove();
+    if (lite) solidify(root);
+    var kids = root.children || [];
+    for (var i = 0; i < kids.length && i < 40; i++) {
+      if (lite) solidify(kids[i]);
+      if (kids[i].tagName === 'DIV' && isOverlay(kids[i])) kids[i].remove();
     }
+    var links = root.querySelectorAll ? root.querySelectorAll('a[href^="http"]') : [];
+    for (var j = 0; j < links.length; j++) {
+      if (!linkAllowed(links[j].getAttribute('href')) && isOverlay(links[j])) links[j].remove();
+    }
+    if (lite) {
+      var frames = root.tagName === 'IFRAME' ? [root] : root.querySelectorAll('iframe[src*="youtube"]');
+      for (var k = 0; k < frames.length; k++) {
+        if (/[?&]mute=1/.test(frames[k].src)) stopFrame(frames[k]);
+      }
+    }
+  }
+  function stopFrame(f) {
+    f.removeAttribute('src');
+    f.style.setProperty('display', 'none', 'important');
+  }
+  // Pages change in bursts, so check them in batches rather than per element.
+  var queue = [], timer = 0;
+  function flush() {
+    timer = 0;
+    var batch = queue;
+    queue = [];
+    batch.forEach(function (n) { if (n.isConnected) sweep(n); });
   }
   function startObserver() {
     new MutationObserver(function (records) {
       records.forEach(function (rec) {
-        for (var i = 0; i < rec.addedNodes.length; i++) sweep(rec.addedNodes[i]);
+        for (var i = 0; i < rec.addedNodes.length; i++) {
+          if (rec.addedNodes[i].nodeType === 1) queue.push(rec.addedNodes[i]);
+        }
       });
+      if (queue.length && !timer) timer = setTimeout(flush, 150);
     }).observe(document.documentElement, { childList: true, subtree: true });
     if (document.body) sweep(document.body);
   }

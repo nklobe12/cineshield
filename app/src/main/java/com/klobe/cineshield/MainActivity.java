@@ -64,7 +64,10 @@ public class MainActivity extends Activity {
     private final Runnable moveLoop = new Runnable() {
         @Override
         public void run() {
-            if (!(left || right || up || down)) return;
+            if (!(left || right || up || down)) {
+                sendMouse(MotionEvent.ACTION_HOVER_MOVE, 0f);
+                return;
+            }
             heldFrames++;
             float density = getResources().getDisplayMetrics().density;
             float step = Math.min(3f + heldFrames * 0.35f, 14f) * density;
@@ -79,7 +82,8 @@ public class MainActivity extends Activity {
             x = Math.max(0, Math.min(w, x));
             y = Math.max(0, Math.min(h, y));
             cursor.moveTo(x, y);
-            sendMouse(MotionEvent.ACTION_HOVER_MOVE, 0f);
+            // Hover makes the page recalculate, so send it sparingly while moving.
+            if (heldFrames % 6 == 0) sendMouse(MotionEvent.ACTION_HOVER_MOVE, 0f);
             ui.postDelayed(this, 16);
         }
     };
@@ -97,7 +101,7 @@ public class MainActivity extends Activity {
         cursor = new CursorView(this);
         cursor.setFocusable(false);
         root.addView(web, new FrameLayout.LayoutParams(-1, -1));
-        root.addView(cursor, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(cursor, new FrameLayout.LayoutParams(-2, -2));
         setContentView(root);
 
         WebSettings s = web.getSettings();
@@ -185,6 +189,10 @@ public class MainActivity extends Activity {
             Uri uri = request.getUrl();
             if (!isWeb(uri)) return null;
             String host = uri.getHost();
+            String path = uri.getPath();
+            if (path != null && path.toLowerCase(java.util.Locale.ROOT).endsWith(".gif")) {
+                return emptyResponse();
+            }
             if (request.isForMainFrame() && !AdBlocker.isSite(host)) return emptyResponse();
             return blocker.isAd(host) ? emptyResponse() : null;
         }

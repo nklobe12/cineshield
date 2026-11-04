@@ -31,16 +31,24 @@ final class CursorView extends View {
         arrow.close();
     }
 
+    /** Moving a small view is far cheaper than redrawing the whole screen. */
     void moveTo(float x, float y) {
         px = x;
         py = y;
-        invalidate();
+        setTranslationX(x);
+        setTranslationY(y);
+    }
+
+    @Override
+    protected void onMeasure(int widthSpec, int heightSpec) {
+        float s = getResources().getDisplayMetrics().density * 1.6f;
+        setMeasuredDimension((int) Math.ceil(16 * s), (int) Math.ceil(23 * s));
     }
 
     @Override
     protected void onDraw(Canvas c) {
         c.save();
-        c.translate(px, py);
+        c.translate(2, 2);
         c.drawPath(arrow, fill);
         c.drawPath(arrow, edge);
         c.restore();
