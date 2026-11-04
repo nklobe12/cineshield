@@ -2,6 +2,7 @@ package com.klobe.cineshield;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
@@ -16,6 +17,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.webkit.GeolocationPermissions;
+import android.webkit.JavascriptInterface;
 import android.webkit.JsPromptResult;
 import android.webkit.JsResult;
 import android.webkit.PermissionRequest;
@@ -33,6 +35,9 @@ import android.widget.Toast;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -48,45 +53,15 @@ public class MainActivity extends Activity {
 
     private FrameLayout root;
     private WebView web;
-    private CursorView cursor;
+    private PlayerUi player;
+    private SharedPreferences prefs;
     private View fullscreenView;
     private WebChromeClient.CustomViewCallback fullscreenCallback;
     private String guardJs;
     private boolean guardRunsEarly;
     private long lastBackAt;
 
-    private boolean left, right, up, down;
-    private int heldFrames;
-    private long pressDownAt;
-
-    private final Runnable hideCursor = () -> cursor.setVisibility(View.GONE);
-
-    private final Runnable moveLoop = new Runnable() {
-        @Override
-        public void run() {
-            if (!(left || right || up || down)) {
-                sendMouse(MotionEvent.ACTION_HOVER_MOVE, 0f);
-                return;
-            }
-            heldFrames++;
-            float density = getResources().getDisplayMetrics().density;
-            float step = Math.min(3f + heldFrames * 0.35f, 14f) * density;
-            float x = cursor.px + ((right ? step : 0) - (left ? step : 0));
-            float y = cursor.py + ((down ? step : 0) - (up ? step : 0));
-            int w = root.getWidth() - 1;
-            int h = root.getHeight() - 1;
-            float edge = 12 * density;
-            // Reaching the top or bottom of the screen scrolls the page.
-            if (up && y <= edge) sendWheel(1f);
-            if (down && y >= h - edge) sendWheel(-1f);
-            x = Math.max(0, Math.min(w, x));
-            y = Math.max(0, Math.min(h, y));
-            cursor.moveTo(x, y);
-            // Hover makes the page recalculate, so send it sparingly while moving.
-            if (heldFrames % 6 == 0) sendMouse(MotionEvent.ACTION_HOVER_MOVE, 0f);
-            ui.postDelayed(this, 16);
-        }
-    };
+    private long lastMoveAt;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -98,11 +73,26 @@ public class MainActivity extends Activity {
 
         root = new FrameLayout(this);
         web = new WebView(this);
-        cursor = new CursorView(this);
-        cursor.setFocusable(false);
         root.addView(web, new FrameLayout.LayoutParams(-1, -1));
-        root.addView(cursor, new FrameLayout.LayoutParams(-2, -2));
         setContentView(root);
+        prefs = getSharedPreferences("cineshield", MODE_PRIVATE);
+        player = new PlayerUi(this, root, new PlayerUi.Host() {
+            @Override
+            public void command(String name, double value) {
+                sendPlayerCommand(name, value);
+            }
+
+            @Override
+            public String title() {
+                return web.getTitle();
+            }
+
+            @Override
+            public void closed() {
+                sendPlayerCommand("pause", 0);
+                sendPlayerCommand("unfill", 0);
+            }
+        });
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -118,10 +108,12 @@ public class MainActivity extends Activity {
         s.setSupportMultipleWindows(true);
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(false);
+        s.setTextZoom(115);
         s.setUserAgentString(s.getUserAgentString().replace("; wv", "")
                 .replaceAll("Version/[0-9.]+ ", ""));
 
         web.setBackgroundColor(0xFF000000);
+        web.addJavascriptInterface(new Bridge(), "CineShieldBridge");
         web.setWebViewClient(new ShieldClient());
         web.setWebChromeClient(new ShieldChrome());
         web.setDownloadListener((url, ua, cd, mime, len) -> notice("Blocked a download"));
@@ -130,11 +122,6 @@ public class MainActivity extends Activity {
             WebViewCompat.addDocumentStartJavaScript(web, guardJs, Collections.singleton("*"));
             guardRunsEarly = true;
         }
-
-        root.post(() -> {
-            cursor.moveTo(root.getWidth() / 2f, root.getHeight() / 2f);
-            showCursor();
-        });
 
         if (state != null) web.restoreState(state);
         else web.loadUrl(HOME);
@@ -210,9 +197,14 @@ public class MainActivity extends Activity {
         }
 
         @Override
+        public void onPageFinished(WebView view, String url) {
+            ui.postDelayed(() -> web.evaluateJavascript("window.__cs&&__cs.init()", null), 800);
+        }
+
+        @Override
         public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
             if (request.isForMainFrame() && AdBlocker.isSite(request.getUrl().getHost())) {
-                notice("Can't reach the site. Press Menu to retry.");
+                notice("Can't reach the site. Open Menu to reload.");
             }
         }
 
@@ -327,68 +319,76 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void showCursor() {
-        cursor.setVisibility(View.VISIBLE);
-        ui.removeCallbacks(hideCursor);
-        ui.postDelayed(hideCursor, CURSOR_HIDE_MS);
-    }
-
-    private View pointerTarget() {
-        return fullscreenView != null ? fullscreenView : web;
-    }
-
-    private MotionEvent mouseEvent(int action, long now, float wheel) {
-        MotionEvent.PointerProperties props = new MotionEvent.PointerProperties();
-        props.id = 0;
-        props.toolType = MotionEvent.TOOL_TYPE_MOUSE;
-        MotionEvent.PointerCoords coords = new MotionEvent.PointerCoords();
-        coords.x = cursor.px;
-        coords.y = cursor.py;
-        coords.pressure = 1f;
-        coords.size = 1f;
-        coords.setAxisValue(MotionEvent.AXIS_VSCROLL, wheel);
-        return MotionEvent.obtain(now, now, action, 1,
-                new MotionEvent.PointerProperties[]{props},
-                new MotionEvent.PointerCoords[]{coords},
-                0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_MOUSE, 0);
-    }
-
-    private void sendMouse(int action, float wheel) {
-        MotionEvent e = mouseEvent(action, SystemClock.uptimeMillis(), wheel);
-        pointerTarget().dispatchGenericMotionEvent(e);
-        e.recycle();
-    }
-
-    private void sendWheel(float wheel) {
-        sendMouse(MotionEvent.ACTION_SCROLL, wheel);
-    }
-
-    private void sendTouch(int action) {
-        long now = SystemClock.uptimeMillis();
-        if (action == MotionEvent.ACTION_DOWN) pressDownAt = now;
-        MotionEvent e = MotionEvent.obtain(pressDownAt, now, action, cursor.px, cursor.py, 0);
-        e.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-        pointerTarget().dispatchTouchEvent(e);
-        e.recycle();
-    }
-
-    private void setHeld(int keyCode, boolean held) {
-        boolean wasMoving = left || right || up || down;
-        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) left = held;
-        else if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) right = held;
-        else if (keyCode == KeyEvent.KEYCODE_DPAD_UP) up = held;
-        else down = held;
-        if (held && !wasMoving) {
-            heldFrames = 0;
-            ui.post(moveLoop);
+    /** Only reports video status. Every frame can reach this, so it does nothing else. */
+    private final class Bridge {
+        @JavascriptInterface
+        public void state(String json) {
+            ui.post(() -> player.onState(json));
         }
-        showCursor();
+
+        @JavascriptInterface
+        public boolean lite() {
+            return prefs.getBoolean("lite", true);
+        }
+    }
+
+    private void pressAt(float fx, float fy) {
+        float x = fx * web.getWidth();
+        float y = fy * web.getHeight();
+        long down = SystemClock.uptimeMillis();
+        MotionEvent e = MotionEvent.obtain(down, down, MotionEvent.ACTION_DOWN, x, y, 0);
+        e.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        web.dispatchTouchEvent(e);
+        e.recycle();
+        ui.postDelayed(() -> {
+            long now = SystemClock.uptimeMillis();
+            MotionEvent u = MotionEvent.obtain(down, now, MotionEvent.ACTION_UP, x, y, 0);
+            u.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+            web.dispatchTouchEvent(u);
+            u.recycle();
+        }, 50);
+    }
+
+    private void pressFocused() {
+        web.evaluateJavascript("window.__cs?__cs.press():null", value -> {
+            if (value == null || !value.startsWith("[")) return;
+            try {
+                JSONArray at = new JSONArray(value);
+                pressAt((float) at.getDouble(0), (float) at.getDouble(1));
+            } catch (JSONException ignored) {
+            }
+        });
+    }
+
+    private void moveFocus(String direction) {
+        long now = SystemClock.uptimeMillis();
+        if (now - lastMoveAt < 110) return;
+        lastMoveAt = now;
+        web.evaluateJavascript("window.__cs&&__cs.move('" + direction + "')", null);
+    }
+
+    private void openAppSettings() {
+        boolean lite = prefs.getBoolean("lite", true);
+        TvMenu.show(root, "Settings", java.util.Arrays.asList(
+                new TvMenu.Item("Home", () -> web.loadUrl(HOME)),
+                new TvMenu.Item("Reload page", web::reload),
+                new TvMenu.Item("Simple menus: " + (lite ? "On" : "Off"), () -> {
+                    prefs.edit().putBoolean("lite", !lite).apply();
+                    web.reload();
+                }),
+                new TvMenu.Item("Clear site data", () -> {
+                    web.clearCache(true);
+                    android.webkit.WebStorage.getInstance().deleteAllData();
+                    android.webkit.CookieManager.getInstance().removeAllCookies(null);
+                    web.loadUrl(HOME);
+                }),
+                new TvMenu.Item("Exit app", this::finish)));
     }
 
     /** Reaches the player even inside a cross-origin frame. See guard.js. */
-    private void sendPlayerCommand(String command, int seconds) {
+    private void sendPlayerCommand(String command, double value) {
         web.evaluateJavascript("(function f(w){try{w.postMessage({cineshield:'" + command + "',s:"
-                + seconds + "},'*')}catch(e){}for(var i=0;i<w.frames.length;i++)f(w.frames[i])})(window)",
+                + value + "},'*')}catch(e){}for(var i=0;i<w.frames.length;i++)f(w.frames[i])})(window)",
                 null);
     }
 
@@ -407,45 +407,48 @@ public class MainActivity extends Activity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
+        if (TvMenu.isOpen(root)) {
+            if (e.getKeyCode() == KeyEvent.KEYCODE_BACK || e.getKeyCode() == KeyEvent.KEYCODE_MENU) {
+                if (e.getAction() == KeyEvent.ACTION_UP) TvMenu.close(root);
+                return true;
+            }
+            return super.dispatchKeyEvent(e);
+        }
+        if (player.isActive()) {
+            return player.handleKey(e) || super.dispatchKeyEvent(e);
+        }
         int key = e.getKeyCode();
         boolean isDown = e.getAction() == KeyEvent.ACTION_DOWN;
-        boolean first = isDown && e.getRepeatCount() == 0;
         boolean isUp = e.getAction() == KeyEvent.ACTION_UP;
         switch (key) {
             case KeyEvent.KEYCODE_DPAD_LEFT:
+                if (isDown) moveFocus("left");
+                return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
+                if (isDown) moveFocus("right");
+                return true;
             case KeyEvent.KEYCODE_DPAD_UP:
+                if (isDown) moveFocus("up");
+                return true;
             case KeyEvent.KEYCODE_DPAD_DOWN:
-                if (first) setHeld(key, true);
-                else if (isUp) setHeld(key, false);
+                if (isDown) moveFocus("down");
                 return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
             case KeyEvent.KEYCODE_BUTTON_A:
-                if (first) {
-                    showCursor();
-                    sendTouch(MotionEvent.ACTION_DOWN);
-                } else if (isUp) {
-                    sendTouch(MotionEvent.ACTION_UP);
-                }
+                if (isUp) pressFocused();
                 return true;
             case KeyEvent.KEYCODE_BACK:
                 if (isUp) onBack();
                 return true;
             case KeyEvent.KEYCODE_MENU:
-                if (isUp) web.loadUrl(HOME);
+                if (isUp) openAppSettings();
                 return true;
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
             case KeyEvent.KEYCODE_MEDIA_PLAY:
             case KeyEvent.KEYCODE_MEDIA_PAUSE:
-                if (first) sendPlayerCommand("toggle", 0);
-                return true;
-            case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD:
-                if (isDown) sendPlayerCommand("seek", 30);
-                return true;
-            case KeyEvent.KEYCODE_MEDIA_REWIND:
-                if (isDown) sendPlayerCommand("seek", -30);
+                if (isDown && e.getRepeatCount() == 0) sendPlayerCommand("toggle", 0);
                 return true;
             default:
                 return super.dispatchKeyEvent(e);
