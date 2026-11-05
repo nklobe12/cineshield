@@ -79,7 +79,47 @@
     '-webkit-backdrop-filter:none!important;filter:none!important;box-shadow:none!important;' +
     'text-shadow:none!important;scroll-behavior:auto!important}' +
     'img[src*=".gif"]{visibility:hidden!important}' +
-    'html,body{background-image:none!important;background-color:#0b0d10!important}';
+    'html,body{background-image:none!important;background-color:#0b0d10!important}' +
+    'nav{background-color:#101418!important}';
+
+  // The site's moving background is drawn by the graphics chip every frame. Skipping
+  // the draw calls removes that work without breaking the script that runs it.
+  function stopGpuDrawing() {
+    [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function (type) {
+      if (!type) return;
+      ['drawArrays', 'drawElements', 'drawArraysInstanced', 'drawElementsInstanced',
+        'drawRangeElements'].forEach(function (name) {
+        if (type.prototype[name]) type.prototype[name] = function () {};
+      });
+    });
+  }
+  function hideBackdrop(el) {
+    el.style.setProperty('display', 'none', 'important');
+    if (el.tagName === 'CANVAS') {
+      // A tiny drawing surface makes any remaining drawing almost free.
+      el.width = 1;
+      el.height = 1;
+    } else if (el.tagName === 'VIDEO') {
+      el.pause();
+      el.removeAttribute('src');
+      el.load();
+    }
+  }
+  function isBackdrop(el) {
+    if (el.hasAttribute('data-cs-fill') || el.style.display === 'none') return false;
+    var r = el.getBoundingClientRect();
+    if (r.width * r.height < 0.5 * innerWidth * innerHeight) return false;
+    var s = getComputedStyle(el);
+    if (s.position !== 'fixed' && s.position !== 'absolute') return false;
+    if (el.tagName === 'CANVAS') return true;
+    return !el.controls && (el.muted || s.pointerEvents === 'none' || (parseInt(s.zIndex, 10) || 0) < 0);
+  }
+  function clearBackdrops() {
+    var list = document.querySelectorAll('canvas,video');
+    for (var i = 0; i < list.length; i++) {
+      if (isBackdrop(list[i])) hideBackdrop(list[i]);
+    }
+  }
   function addLiteStyle() {
     var style = document.createElement('style');
     style.textContent = LITE_CSS;
@@ -100,6 +140,8 @@
     else document.addEventListener('readystatechange', addLiteStyle, { once: true });
     window.addEventListener('loadedmetadata', stopBackgroundVideo, true);
     window.addEventListener('play', stopBackgroundVideo, true);
+    stopGpuDrawing();
+    setInterval(clearBackdrops, 1500);
   }
 
   var MAX_Z = 2147480000;
